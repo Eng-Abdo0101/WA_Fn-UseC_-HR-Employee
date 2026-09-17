@@ -3,33 +3,26 @@ import pandas as pd
 import joblib
 
 
-attrition_model = joblib.load("employee_attrition_catboost_model.pkl")
-attrition_features = joblib.load("employee_features.pkl")
-
-salary_model = joblib.load("employee_salary_xgb_model.pkl")
-salary_scaler = joblib.load("employee_salary_scaler.pkl")
-salary_features = joblib.load("employee_salary_features.pkl")
+model = joblib.load("employee_attrition_catboost_model.pkl")
+features = joblib.load("employee_features.pkl")
 
 
 st.set_page_config(
-    page_title="Employee Attrition & Salary Prediction",
+    page_title="Employee Attrition Prediction",
     page_icon="👨‍💼",
     layout="centered"
 )
 
-st.title("Employee Attrition & Salary Prediction")
+st.title("Employee Attrition Prediction")
 st.write(
-    "Predict whether an employee is likely to leave the company, and estimate "
-    "a fair Monthly Income, using Machine Learning."
+    "Predict whether an employee is likely to leave the company using Machine Learning."
 )
 
 # ---------------------------------------------------------------------------
-# Both models were trained on ~50 raw + engineered features, not just a
-# handful. This form collects (almost) everything the training pipeline
-# used, then rebuilds the same engineered features before encoding.
-# Monthly Income is only used by the attrition (classification) model —
-# for the salary (regression) tab it's the thing being predicted, so it's
-# left out of that model's input row.
+# The model was trained on 51 features (raw columns + engineered features),
+# not just a handful of inputs. To get an accurate prediction we need to
+# collect (almost) everything the training pipeline used, then rebuild the
+# exact same engineered features before encoding.
 # ---------------------------------------------------------------------------
 
 st.header("Personal Info")
@@ -75,10 +68,9 @@ with c2:
     num_companies = st.number_input("Num Companies Worked", 0, 9, 2)
 
 st.header("Compensation")
-st.caption("Monthly Income is only used by the attrition prediction — the salary tab predicts it instead.")
 c1, c2 = st.columns(2)
 with c1:
-    monthly_income = st.number_input("Monthly Income (for attrition check)", 1000, 20000, 5000)
+    monthly_income = st.number_input("Monthly Income", 1000, 20000, 5000)
     daily_rate = st.number_input("Daily Rate", 100, 1500, 800)
 with c2:
     hourly_rate = st.number_input("Hourly Rate", 30, 100, 65)
@@ -108,11 +100,52 @@ with c2:
     years_with_manager = st.number_input("Years With Current Manager", 0, 17, 3)
     training_times = st.number_input("Training Times Last Year", 0, 6, 2)
 
+# This is the empirically-best decision threshold found in the notebook's
+# threshold-tuning step (cell 112), not the default 0.5 — with class weights
+# skewed toward the minority class, 0.5 under-predicts attrition.
+threshold = st.slider(
+    "Decision threshold (lower = flags more employees as at-risk)",
+    0.1, 0.9, 0.30, 0.05
+)
 
-def build_engineered_row(raw: dict) -> pd.DataFrame:
-    """Recreate the exact engineered features from the notebook (cells 26-32)."""
-    df = pd.DataFrame([raw])
+if st.button("Predict"):
 
+    raw = {
+        "Age": age,
+        "DailyRate": daily_rate,
+        "DistanceFromHome": distance,
+        "Education": education,
+        "EnvironmentSatisfaction": environment_satisfaction,
+        "HourlyRate": hourly_rate,
+        "JobInvolvement": job_involvement,
+        "JobLevel": job_level,
+        "JobSatisfaction": job_satisfaction,
+        "MonthlyIncome": monthly_income,
+        "MonthlyRate": monthly_rate,
+        "NumCompaniesWorked": num_companies,
+        "PercentSalaryHike": percent_salary_hike,
+        "PerformanceRating": performance_rating,
+        "RelationshipSatisfaction": relationship_satisfaction,
+        "StockOptionLevel": stock_option_level,
+        "TotalWorkingYears": total_working_years,
+        "TrainingTimesLastYear": training_times,
+        "WorkLifeBalance": work_life_balance,
+        "YearsAtCompany": years_company,
+        "YearsInCurrentRole": years_in_role,
+        "YearsSinceLastPromotion": years_since_promotion,
+        "YearsWithCurrManager": years_with_manager,
+        "BusinessTravel": business_travel,
+        "Department": department,
+        "EducationField": education_field,
+        "Gender": gender,
+        "JobRole": job_role,
+        "MaritalStatus": marital_status,
+        "OverTime": overtime,
+    }
+
+    input_df = pd.DataFrame([raw])
+
+    # --- Recreate the exact engineered features from the notebook ---
     def age_group(a):
         if a < 30:
             return "Young"
@@ -123,95 +156,40 @@ def build_engineered_row(raw: dict) -> pd.DataFrame:
         else:
             return "Senior"
 
-    df["AgeGroup"] = df["Age"].apply(age_group)
+    input_df["AgeGroup"] = input_df["Age"].apply(age_group)
 
-    df["OverallSatisfaction"] = (
-        df["JobSatisfaction"]
-        + df["EnvironmentSatisfaction"]
-        + df["RelationshipSatisfaction"]
-        + df["JobInvolvement"]
+    input_df["OverallSatisfaction"] = (
+        input_df["JobSatisfaction"]
+        + input_df["EnvironmentSatisfaction"]
+        + input_df["RelationshipSatisfaction"]
+        + input_df["JobInvolvement"]
     )
 
-    df["CompanyTenureRatio"] = df["YearsAtCompany"] / (df["TotalWorkingYears"] + 1)
-
-    df["PromotionDelayRatio"] = df["YearsSinceLastPromotion"] / (df["YearsAtCompany"] + 1)
-
-    df["OverTime_WorkLife"] = (
-        (df["OverTime"] == "Yes").astype(int) * df["WorkLifeBalance"]
+    input_df["CompanyTenureRatio"] = (
+        input_df["YearsAtCompany"] / (input_df["TotalWorkingYears"] + 1)
     )
 
-    return df
-
-
-shared_raw = {
-    "Age": age,
-    "DailyRate": daily_rate,
-    "DistanceFromHome": distance,
-    "Education": education,
-    "EnvironmentSatisfaction": environment_satisfaction,
-    "HourlyRate": hourly_rate,
-    "JobInvolvement": job_involvement,
-    "JobLevel": job_level,
-    "JobSatisfaction": job_satisfaction,
-    "MonthlyRate": monthly_rate,
-    "NumCompaniesWorked": num_companies,
-    "PercentSalaryHike": percent_salary_hike,
-    "PerformanceRating": performance_rating,
-    "RelationshipSatisfaction": relationship_satisfaction,
-    "StockOptionLevel": stock_option_level,
-    "TotalWorkingYears": total_working_years,
-    "TrainingTimesLastYear": training_times,
-    "WorkLifeBalance": work_life_balance,
-    "YearsAtCompany": years_company,
-    "YearsInCurrentRole": years_in_role,
-    "YearsSinceLastPromotion": years_since_promotion,
-    "YearsWithCurrManager": years_with_manager,
-    "BusinessTravel": business_travel,
-    "Department": department,
-    "EducationField": education_field,
-    "Gender": gender,
-    "JobRole": job_role,
-    "MaritalStatus": marital_status,
-    "OverTime": overtime,
-}
-
-tab1, tab2 = st.tabs(["🚪 Attrition Risk", "💰 Salary Estimate"])
-
-with tab1:
-    threshold = st.slider(
-        "Decision threshold (lower = flags more employees as at-risk)",
-        0.1, 0.9, 0.30, 0.05
+    input_df["PromotionDelayRatio"] = (
+        input_df["YearsSinceLastPromotion"] / (input_df["YearsAtCompany"] + 1)
     )
 
-    if st.button("Predict Attrition"):
-        raw = dict(shared_raw)
-        raw["MonthlyIncome"] = monthly_income
+    input_df["OverTime_WorkLife"] = (
+        (input_df["OverTime"] == "Yes").astype(int) * input_df["WorkLifeBalance"]
+    )
 
-        input_df = build_engineered_row(raw)
-        input_encoded = pd.get_dummies(input_df, drop_first=True)
-        input_final = input_encoded.reindex(columns=attrition_features, fill_value=0)
+    # --- One-hot encode categoricals the same way as training ---
+    input_encoded = pd.get_dummies(input_df, drop_first=True)
 
-        probability = attrition_model.predict_proba(input_final)[0][1]
-        prediction = int(probability >= threshold)
+    # --- Align to the exact columns the model was trained on ---
+    input_final = input_encoded.reindex(columns=features, fill_value=0)
 
-        if prediction == 1:
-            st.error(f"Employee is likely to leave the company — Probability: {probability:.2f}")
-        else:
-            st.success(f"Employee is likely to stay — Probability: {probability:.2f}")
+    probability = model.predict_proba(input_final)[0][1]
+    prediction = int(probability >= threshold)
 
-        with st.expander("Show model inputs"):
-            st.dataframe(input_final)
+    if prediction == 1:
+        st.error(f"Employee is likely to leave the company — Probability: {probability:.2f}")
+    else:
+        st.success(f"Employee is likely to stay — Probability: {probability:.2f}")
 
-with tab2:
-    if st.button("Predict Salary"):
-        input_df = build_engineered_row(shared_raw)
-        input_encoded = pd.get_dummies(input_df, drop_first=True)
-        input_aligned = input_encoded.reindex(columns=salary_features, fill_value=0)
-        input_scaled = salary_scaler.transform(input_aligned)
-
-        predicted_salary = salary_model.predict(input_scaled)[0]
-
-        st.success(f"Estimated fair Monthly Income: **${predicted_salary:,.0f}**")
-
-        with st.expander("Show model inputs"):
-            st.dataframe(input_aligned)
+    with st.expander("Show model inputs"):
+        st.dataframe(input_final)
